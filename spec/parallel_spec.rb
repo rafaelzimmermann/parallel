@@ -5,6 +5,7 @@ describe Parallel do
   worker_types = ["threads"]
   worker_types << "processes" if Process.respond_to?(:fork)
   worker_types << "ractors" if defined?(Ractor)
+  worker_types << "fibers"
 
   def time_taken
     t = Time.now.to_f
@@ -219,6 +220,29 @@ describe Parallel do
     it "raises when a thread raises" do
       Thread.report_on_exception = false
       -> { Parallel.in_threads(2) { |_i| raise "TEST" } }.should raise_error("TEST")
+    ensure
+      Thread.report_on_exception = true
+    end
+  end
+
+  describe ".in_fibers" do
+    it "saves time" do
+      time_taken do
+        fibers = Parallel.in_fibers(3) { sleep 2 }
+      end.should < 3
+    end
+
+    it "does not create new processes" do
+      -> { Thread.new { Parallel.in_fibers(2) { sleep 1 }.map{ |fiber| fiber.resume } } }.should_not(change { `ps`.split("\n").size })
+    end
+
+    it "returns results as array" do
+      Parallel.in_fibers(4) { |i| "XXX#{i}" }.each_with_index.map{ |fiber, index| fiber.resume(index) }.should == ["XXX0", 'XXX1', 'XXX2', 'XXX3']
+    end
+
+    it "raises when a thread raises" do
+      Thread.report_on_exception = false
+      -> { Parallel.in_fibers(2) { |_i| raise "TEST" }.map{ |fiber| fiber.resume } }.should raise_error("TEST")
     ensure
       Thread.report_on_exception = true
     end

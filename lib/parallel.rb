@@ -228,6 +228,34 @@ module Parallel
       end
     end
 
+
+    def in_fibers(options = { count: 2 }, &block)
+      fibers = []
+      count, = extract_count_from_options(options)
+      count.times do |i|
+        fibers << Fiber.new(blocking: false) do
+          first_execution = true
+          args = -1
+          loop do
+            if first_execution
+              args = Fiber.yield
+            else
+              begin
+                result = block.call(*args)
+                args = Fiber.yield(result) || args
+              rescue ::Exception => e
+                Fiber.yield(e)
+                return
+              end
+            end
+            first_execution = false
+          end
+        end
+      end
+      fibers.each { |fiber| fiber.resume }
+      fibers
+    end
+
     def in_processes(options = {}, &block)
       count, options = extract_count_from_options(options)
       count ||= processor_count
@@ -267,6 +295,9 @@ module Parallel
       elsif options[:in_ractors]
         method = :in_ractors
         size = options[method]
+      elsif options[:in_fibers]
+        method = :in_fibers
+        size = options[method]
       else
         method = :in_processes
         if Process.respond_to?(:fork)
@@ -290,6 +321,8 @@ module Parallel
           work_in_threads(job_factory, options.merge(count: size), &block)
         elsif method == :in_ractors
           work_in_ractors(job_factory, options.merge(count: size), &block)
+        elsif method == :in_fibers
+          work_in_fibers(job_factory, options.merge(count: size), &block)
         else
           work_in_processes(job_factory, options.merge(count: size), &block)
         end
@@ -381,6 +414,45 @@ module Parallel
           rescue StandardError
             exception = $!
           end
+        end
+      end
+
+      exception || results
+    end
+
+    def work_in_fibers(job_factory, options, &block)
+      results = []
+      results_mutex = Mutex.new # arrays are not thread-safe on jRuby
+      exception = nil
+      self.worker_number = extract_count_from_options(options)
+
+      fibers = in_fibers(options, &block)
+      current_fiber = 0
+
+      # as long as there are more jobs, work on one of them
+      while !exception && set = job_factory.next
+        begin
+          item, index = set
+          result = with_instrumentation item, index, options do
+            args = [item]
+            args << index if options[:with_index]
+            fiber_result = fibers[current_fiber].resume(args)
+            current_fiber += 1
+            if current_fiber >= fibers.length
+              current_fiber = 0
+            end
+            if fiber_result.is_a?(Exception)
+              exception = fiber_result
+            end
+            if options[:return_results]
+              fiber_result
+            else
+              nil # avoid GC overhead of passing large results around
+            end
+          end
+          results_mutex.synchronize { results[index] = result }
+        rescue StandardError
+          exception = $!
         end
       end
 
