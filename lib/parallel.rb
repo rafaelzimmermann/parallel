@@ -2,6 +2,7 @@
 require 'rbconfig'
 require 'parallel/version'
 require 'parallel/processor_count'
+require 'fiber'
 
 module Parallel
   extend ProcessorCount
@@ -229,31 +230,57 @@ module Parallel
     end
 
 
-    def in_fibers(options = { count: 2 }, &block)
-      fibers = []
-      count, = extract_count_from_options(options)
-      count.times do |i|
-        fibers << Fiber.new(blocking: false) do
-          first_execution = true
-          args = -1
-          loop do
-            if first_execution
+    def new_fiber_worker(index, options, workers, main_fiber, &block)
+      Fiber.new(blocking: false) do |args|
+        loop do
+          begin
+            self.worker_number, = workers.select{ |x| x.nil? }.length
+            if args.nil?
               args = Fiber.yield
             else
-              begin
-                result = block.call(*args)
-                args = Fiber.yield(result) || args
-              rescue ::Exception => e
-                Fiber.yield(e)
-                return
-              end
+              instrument_start args, index, options
+              result = block.call(*args)
+              instrument_finish args, index, result, options
+              args = Fiber.yield(result)
             end
-            first_execution = false
+          rescue ::Exception => e
+            args = Fiber.yield(e)
           end
         end
       end
-      fibers.each { |fiber| fiber.resume }
-      fibers
+    end
+
+    def in_fibers(options = { count: 2 }, &block)
+      main_fiber = nil
+      count, = extract_count_from_options(options)
+      workers = Array.new(count) { |_| nil }
+      index = 0
+      main_fiber = Fiber.new(blocking: false) do  |batch|
+        batch = nil
+        loop do
+          begin
+            if batch.nil?
+              batch = Fiber.yield
+            else
+              results = []
+              batch.each_with_index do |args, batch_index|
+                workers[batch_index] ||= new_fiber_worker(index, options, workers, main_fiber, &block)
+                index = index + 1
+                result = workers[batch_index].resume(args)
+                if result.is_a?(Exception)
+                  raise result
+                end
+                results << result
+              end
+              batch = Fiber.yield(results)
+            end
+          rescue ::Exception => e
+            Fiber.yield([e])
+          end
+        end
+      end
+      main_fiber.resume
+      main_fiber
     end
 
     def in_processes(options = {}, &block)
@@ -420,42 +447,54 @@ module Parallel
       exception || results
     end
 
+    def next_batch(size, job_factory, options)
+      counter = 0
+      batch = []
+      while counter < size && set = job_factory.next
+        item, index = set
+        if index == :break
+          break
+        end
+        args = [item]
+        args << index if options[:with_index]
+        batch << args
+        counter += 1
+      end
+      if batch.empty?
+        return nil
+      end
+      batch
+    end
+
+
     def work_in_fibers(job_factory, options, &block)
+      self.worker_number, = extract_count_from_options(options)
       results = []
       results_mutex = Mutex.new # arrays are not thread-safe on jRuby
       exception = nil
-      self.worker_number = extract_count_from_options(options)
-
-      fibers = in_fibers(options, &block)
-      current_fiber = 0
-
+      main_fiber = in_fibers(options, &block)
       # as long as there are more jobs, work on one of them
-      while !exception && set = job_factory.next
+      while exception.nil? && batch = next_batch(self.worker_number, job_factory, options)
         begin
-          item, index = set
-          result = with_instrumentation item, index, options do
-            args = [item]
-            args << index if options[:with_index]
-            fiber_result = fibers[current_fiber].resume(args)
-            current_fiber += 1
-            if current_fiber >= fibers.length
-              current_fiber = 0
-            end
+          if !main_fiber.alive?
+            break
+          end
+          fiber_result = main_fiber.resume(batch)
+          exception =
             if fiber_result.is_a?(Exception)
               exception = fiber_result
+            elsif fiber_result.is_a?(Array)
+              exception = fiber_result.select { |r| r.is_a?(Exception) }.first
             end
-            if options[:return_results]
-              fiber_result
-            else
-              nil # avoid GC overhead of passing large results around
-            end
+          if exception.nil? && options[:return_results]
+            results += fiber_result
           end
-          results_mutex.synchronize { results[index] = result }
         rescue StandardError
           exception = $!
         end
+        if !exception.nil?
+        end
       end
-
       exception || results
     end
 

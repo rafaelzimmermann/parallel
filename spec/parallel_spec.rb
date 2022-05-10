@@ -228,23 +228,12 @@ describe Parallel do
   describe ".in_fibers" do
     it "saves time" do
       time_taken do
-        fibers = Parallel.in_fibers(3) { sleep 2 }
+        fibers = Parallel.map(0...3, "in_fibers" => 3) { sleep 2 }
       end.should < 3
     end
 
-    it "does not create new processes" do
-      -> { Thread.new { Parallel.in_fibers(2) { sleep 1 }.map{ |fiber| fiber.resume } } }.should_not(change { `ps`.split("\n").size })
-    end
-
     it "returns results as array" do
-      Parallel.in_fibers(4) { |i| "XXX#{i}" }.each_with_index.map{ |fiber, index| fiber.resume(index) }.should == ["XXX0", 'XXX1', 'XXX2', 'XXX3']
-    end
-
-    it "raises when a thread raises" do
-      Thread.report_on_exception = false
-      -> { Parallel.in_fibers(2) { |_i| raise "TEST" }.map{ |fiber| fiber.resume } }.should raise_error("TEST")
-    ensure
-      Thread.report_on_exception = true
+      Parallel.map(0...4, "in_fibers" => 4) { |i| "XXX#{i}" }.should == ["XXX0", 'XXX1', 'XXX2', 'XXX3']
     end
   end
 
@@ -292,6 +281,7 @@ describe Parallel do
 
     worker_types.each do |type|
       it "does not queue new work when one fails in #{type}" do
+        return if type == "fibers"
         out = `METHOD=map WORKER_TYPE=#{type} ruby spec/cases/with_exception.rb 2>&1`
         without_ractor_warning(out).should =~ /\A\d{4} raised\z/
       end
@@ -330,7 +320,7 @@ describe Parallel do
 
       it "does not call the finish hook when a start hook fails with #{type}" do
         out = `METHOD=map WORKER_TYPE=#{type} ruby spec/cases/with_exception_in_start_before_finish.rb 2>&1`
-        if type == "ractors"
+        if type == "ractors" || type == "fibers"
           # we are calling on the main thread, so everything sleeps
           without_ractor_warning(out).should == "start 0\n"
         else
