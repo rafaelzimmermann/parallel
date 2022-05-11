@@ -1,0 +1,87 @@
+version: '2.1'
+
+services:
+  api-0:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8080
+    container_name: api-0
+    restart: unless-stopped
+
+  api-1:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8081
+    container_name: api-1
+    restart: unless-stopped
+
+  api-2:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8082
+    container_name: api-2
+    restart: unless-stopped
+
+  api-3:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8083
+    container_name: api-3
+    restart: unless-stopped
+
+  api-4:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8084
+    container_name: api-4
+    restart: unless-stopped
+
+  api-5:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8085
+    container_name: api-5
+    restart: unless-stopped
+
+  api-6:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8086
+    container_name: api-6
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    depends_on:
+      - api-0
+      - api-1
+      - api-2
+      - api-3
+      - api-4
+      - api-5
+      - api-6
+    ports:
+      - "0.0.0.0:9090:80"
+    container_name: nginx
+    restart: unless-stopped
+
+networks:
+  default:
+    # Use a custom driver
+    driver: custom-driver-1
