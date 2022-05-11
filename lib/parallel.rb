@@ -3,6 +3,7 @@ require 'rbconfig'
 require 'parallel/version'
 require 'parallel/processor_count'
 require 'fiber'
+require 'fiber_scheduler'
 
 module Parallel
   extend ProcessorCount
@@ -157,6 +158,45 @@ module Parallel
     end
   end
 
+  class FiberController
+
+    def initialize(options, &block)
+      @index = 0
+      @options = options
+      @block = block
+    end
+
+    def process(batch)
+      results = []
+      Fiber.set_scheduler(FiberScheduler.new)
+      batch.each_with_index do |args, batch_index|
+        @index = @index + 1
+        result =  nil
+        Fiber.schedule do
+          instrument_start args, @index, @options
+          result = @block.call(*args)
+          instrument_finish args, @index, result, @options
+        end
+        if result.is_a?(Exception)
+          return result
+        end
+        results << result
+      end
+      results
+    end
+
+    def instrument_finish(item, index, result, options)
+      return unless on_finish = options[:finish]
+      options[:mutex].synchronize { on_finish.call(item, index, result) }
+    end
+
+    def instrument_start(item, index, options)
+      return unless on_start = options[:start]
+      options[:mutex].synchronize { on_start.call(item, index) }
+    end
+
+  end
+
   class UserInterruptHandler
     INTERRUPT_SIGNAL = :SIGINT
 
@@ -229,58 +269,12 @@ module Parallel
       end
     end
 
-
-    def new_fiber_worker(index, options, workers, main_fiber, &block)
-      Fiber.new(blocking: false) do |args|
-        loop do
-          begin
-            self.worker_number, = workers.select{ |x| x.nil? }.length
-            if args.nil?
-              args = Fiber.yield
-            else
-              instrument_start args, index, options
-              result = block.call(*args)
-              instrument_finish args, index, result, options
-              args = Fiber.yield(result)
-            end
-          rescue ::Exception => e
-            args = Fiber.yield(e)
-          end
-        end
-      end
-    end
-
     def in_fibers(options = { count: 2 }, &block)
       main_fiber = nil
       count, = extract_count_from_options(options)
       workers = Array.new(count) { |_| nil }
-      index = 0
-      main_fiber = Fiber.new(blocking: false) do  |batch|
-        batch = nil
-        loop do
-          begin
-            if batch.nil?
-              batch = Fiber.yield
-            else
-              results = []
-              batch.each_with_index do |args, batch_index|
-                workers[batch_index] ||= new_fiber_worker(index, options, workers, main_fiber, &block)
-                index = index + 1
-                result = workers[batch_index].resume(args)
-                if result.is_a?(Exception)
-                  raise result
-                end
-                results << result
-              end
-              batch = Fiber.yield(results)
-            end
-          rescue ::Exception => e
-            Fiber.yield([e])
-          end
-        end
-      end
-      main_fiber.resume
-      main_fiber
+      
+      FiberController.new(options, &block)
     end
 
     def in_processes(options = {}, &block)
@@ -476,10 +470,7 @@ module Parallel
       # as long as there are more jobs, work on one of them
       while exception.nil? && batch = next_batch(self.worker_number, job_factory, options)
         begin
-          if !main_fiber.alive?
-            break
-          end
-          fiber_result = main_fiber.resume(batch)
+          fiber_result = main_fiber.process(batch)
           exception =
             if fiber_result.is_a?(Exception)
               exception = fiber_result

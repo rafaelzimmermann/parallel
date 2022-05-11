@@ -3,6 +3,7 @@ source "https://rubygems.org"
 gemspec
 
 gem 'bump'
+gem 'fiber_scheduler', "~> 0.13.0"
 gem 'rake'
 gem 'rspec'
 gem 'activerecord', "~> 6.0"
